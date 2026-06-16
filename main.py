@@ -211,11 +211,13 @@ class JmDownloaderPlugin(Star):
         """从 downloads.json 读取下载记录。"""
         path = base_dir / "downloads.json"
         if not path.exists():
-            return {"albums": {}}
+            return {"albums": {}, "disabled_groups": []}
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(data, dict) or "albums" not in data:
-                return {"albums": {}}
+            if not isinstance(data, dict):
+                return {"albums": {}, "disabled_groups": []}
+            data.setdefault("albums", {})
+            data.setdefault("disabled_groups", [])
             return data
         except (json.JSONDecodeError, OSError) as e:
             logger.error(f"[JMDownloader] 无法读取 downloads.json: {e}")
@@ -257,6 +259,34 @@ class JmDownloaderPlugin(Star):
         if len(name) > max_len:
             name = name[:max_len]
         return name or "unknown"
+
+    # ══════════════════════════════════════════════════════════
+    #  群聊黑名单
+    # ══════════════════════════════════════════════════════════
+
+    def _is_group_disabled(self, group_id: Optional[int]) -> bool:
+        """检查群是否被禁用。私聊（group_id=None）不受影响。"""
+        if group_id is None:
+            return False
+        cfg = self._get_config()
+        base_dir = Path(cfg["download_base_dir"])
+        meta = self._load_downloads(base_dir)
+        return str(group_id) in meta.get("disabled_groups", [])
+
+    def _set_group_state(self, group_id: str, enabled: bool) -> bool:
+        """启用/禁用群。返回 True 表示操作成功。"""
+        cfg = self._get_config()
+        base_dir = Path(cfg["download_base_dir"])
+        base_dir.mkdir(parents=True, exist_ok=True)
+        meta = self._load_downloads(base_dir)
+        disabled = meta.setdefault("disabled_groups", [])
+        if enabled:
+            if group_id in disabled:
+                disabled.remove(group_id)
+        else:
+            if group_id not in disabled:
+                disabled.append(group_id)
+        return self._save_downloads(base_dir, meta)
 
     # ══════════════════════════════════════════════════════════
     #  下载与 PDF 转换（同步，在线程池中执行）
@@ -512,7 +542,9 @@ class JmDownloaderPlugin(Star):
                 "  /jm <编号>        下载漫画并上传 PDF\n"
                 "  /jm list           列出已下载的漫画\n"
                 "  /jm delete <编号>  删除指定漫画（管理员）\n"
-                "  /jm delete all     删除全部漫画（管理员）"
+                "  /jm delete all     删除全部漫画（管理员）\n"
+                "  /jm group off <群号> 对该群禁用（管理员）\n"
+                "  /jm group on <群号>  对该群恢复（管理员）"
             )
             return
 
@@ -523,6 +555,9 @@ class JmDownloaderPlugin(Star):
                 yield result
         elif sub == "delete":
             async for result in self._handle_delete(event, args[1:]):
+                yield result
+        elif sub == "group":
+            async for result in self._handle_group(event, args[1:]):
                 yield result
         elif sub.isdigit():
             async for result in self._handle_download(event, sub):
@@ -555,6 +590,11 @@ class JmDownloaderPlugin(Star):
 
         cfg = self._get_config()
         sender_id, group_id = await self._get_sender_info(event)
+
+        # 群聊黑名单检查
+        if self._is_group_disabled(group_id):
+            yield event.plain_result("⛔ 本群已被管理员禁用此功能。")
+            return
 
         base_dir = Path(cfg["download_base_dir"])
         base_dir.mkdir(parents=True, exist_ok=True)
@@ -649,6 +689,51 @@ class JmDownloaderPlugin(Star):
                 f"⚠️ PDF 已生成但上传失败: {e}\n"
                 f"📁 文件: {pdf_path_str}\n"
                 f"[CQ:at,qq={sender_id}] 请联系管理员手动上传"
+            )
+
+    # ══════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════
+    #  /jm group — 群聊黑名单管理
+    # ══════════════════════════════════════════════════════════
+
+    async def _handle_group(
+        self, event: AstrMessageEvent, args: List[str]
+    ):
+        """处理 /jm group on|off <群号>（管理员）。"""
+        if not self._is_admin(event):
+            yield event.plain_result("⛔ 仅管理员可使用此命令。")
+            return
+
+        if len(args) < 2:
+            yield event.plain_result(
+                "用法:\n"
+                "  /jm group off <群号>    对该群禁用\n"
+                "  /jm group on <群号>     对该群开启"
+            )
+            return
+
+        action = args[0].lower()
+        target = args[1]
+
+        if not target.isdigit():
+            yield event.plain_result("❌ 群号必须是数字。")
+            return
+
+        if action == "off":
+            ok = self._set_group_state(target, enabled=False)
+            yield event.plain_result(
+                f"✅ 已对群 {target} 禁用 JM 下载功能。"
+                if ok else "❌ 操作失败。"
+            )
+        elif action == "on":
+            ok = self._set_group_state(target, enabled=True)
+            yield event.plain_result(
+                f"✅ 已对群 {target} 恢复 JM 下载功能。"
+                if ok else "❌ 操作失败。"
+            )
+        else:
+            yield event.plain_result(
+                f"❌ 未知操作: {action}。支持: on / off"
             )
 
     # ══════════════════════════════════════════════════════════
