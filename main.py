@@ -303,59 +303,56 @@ class JmDownloaderPlugin(Star):
             option = jmcomic.create_option_by_file(str(_yml))
             jmcomic.download_album(album_id, option)
 
-            # ── 步骤 2: 查找下载的文件 ──
-            logger.info(
-                f"[JMDownloader] tmp_dir 内容: {list(tmp_dir.iterdir())}"
-                f", cwd 内容: {os.listdir('.')}"
-            )
-            subdirs = [
-                d for d in tmp_dir.iterdir()
-                if d.is_dir() and d.name != "__pycache__"
-            ]
-            # jmcomic 有时直接下到当前目录，文件不在子目录里
-            image_files: List[Path] = []
-            for ext in (".webp", ".jpg", ".jpeg", ".png"):
-                image_files.extend(tmp_dir.rglob(f"*{ext}"))
-                image_files.extend(tmp_dir.rglob(f"*{ext.upper()}"))
-
-            if subdirs:
-                title = subdirs[0].name
-            logger.info(
-                f"[JMDownloader] 漫画 #{album_id} 下载完成，"
-                f"标题: {title}, 子目录: {len(subdirs)}, 图片: {len(image_files)}"
-            )
-
-            # ── 步骤 3: 移动文件到目标目录 ──
+            # ── 步骤 2: 平铺所有图片到目标目录 ──
             target_dir = base_dir / album_id
             if target_dir.exists():
                 shutil.rmtree(target_dir)
             target_dir.mkdir(parents=True, exist_ok=True)
 
+            subdirs = sorted([
+                d for d in tmp_dir.iterdir()
+                if d.is_dir() and d.name != "__pycache__"
+            ])
             if subdirs:
-                # 有子目录：移动子目录内容到目标目录
-                dl_dir = subdirs[0]
-                for item in dl_dir.iterdir():
-                    shutil.move(str(item), str(target_dir / item.name))
-                # 清理空子目录
-                shutil.rmtree(dl_dir)
-            elif image_files:
-                # 没有子目录但直接在 tmp_dir 有图片
-                for f in image_files:
+                title = subdirs[0].name
+
+            total_moved = 0
+            seen_names = set()
+            for sd in subdirs:
+                for f in sorted(sd.iterdir()):
+                    if f.is_file():
+                        dest_name = f.name
+                        if dest_name in seen_names:
+                            dest_name = f"{sd.name}_{f.name}"
+                        seen_names.add(dest_name)
+                        shutil.move(str(f), str(target_dir / dest_name))
+                        total_moved += 1
+                shutil.rmtree(sd)
+
+            for f in sorted(tmp_dir.iterdir()):
+                if f.is_file() and f.suffix.lower() in (".webp", ".jpg", ".jpeg", ".png"):
                     shutil.move(str(f), str(target_dir / f.name))
-                image_files = []  # 下面重新扫描 target_dir
-            else:
+                    total_moved += 1
+
+            logger.info(
+                f"[JMDownloader] #{album_id} 下载完成，"
+                f"标题: {title}, 移动 {total_moved} 个文件"
+            )
+
+            if total_moved == 0:
                 return {
                     "success": False,
                     "error": "下载后未找到任何图片文件",
                     "title": title,
                     "album_id": album_id,
                 }
-            # ── 步骤 4: 重新扫描目标目录收集图片 ──
-            image_files: List[Path] = []
-            for ext in (".webp", ".jpg", ".jpeg", ".png"):
-                image_files.extend(target_dir.rglob(f"*{ext}"))
-                image_files.extend(target_dir.rglob(f"*{ext.upper()}"))
 
+            # ── 步骤 3: 扫描图片去重 ──
+            raw_files: List[Path] = []
+            for ext in (".webp", ".jpg", ".jpeg", ".png"):
+                raw_files.extend(target_dir.rglob(f"*{ext}"))
+                raw_files.extend(target_dir.rglob(f"*{ext.upper()}"))
+            image_files = list(dict.fromkeys(raw_files))
             if not image_files:
                 return {
                     "success": False,
