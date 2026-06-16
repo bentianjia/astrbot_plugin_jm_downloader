@@ -1,0 +1,13 @@
+name: astrbot_plugin_jm_downloader
+author: bentianjia
+display_name: JMComic 漫画下载器
+desc: >-
+  通过 /jm 命令下载禁漫天堂漫画并转为 PDF 上传至 QQ 群文件。
+  支持 /jm <编号> 下载、/jm list 查看、/jm delete 删除。
+  基于 JMComic-Crawler-Python API。
+version: 1.0.0
+repo: https://github.com/bentianjia/astrbot_plugin_jm_downloader
+support_platforms:
+  - aiocqhttp
+  - napcat
+astrbot_version: ">=4.16,<5"

@@ -1,0 +1,26 @@
+{
+  "enable": {
+    "type": "bool",
+    "label": "启用插件",
+    "default": true,
+    "description": "开启或关闭 JMComic 漫画下载功能"
+  },
+  "download_base_dir": {
+    "type": "string",
+    "label": "下载根目录",
+    "default": "data/jm_downloads",
+    "description": "漫画下载和 PDF 存储的目录，支持绝对路径或相对路径（相对于 AstrBot 工作目录）"
+  },
+  "pdf_quality": {
+    "type": "int",
+    "label": "PDF 图片质量",
+    "default": 95,
+    "description": "PDF 中图片的 JPEG 压缩质量 (1-100)，越高越清晰但文件越大"
+  },
+  "progress_updates": {
+    "type": "bool",
+    "label": "进度通知",
+    "default": true,
+    "description": "下载过程中是否在群里发送进度消息"
+  }
+}
