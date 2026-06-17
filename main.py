@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import time
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -73,9 +74,38 @@ class JmDownloaderPlugin(Star):
 
     def __init__(self, context: Context) -> None:
         super().__init__(context)
-        self._lock = asyncio.Lock()
-        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="jm_")
+        self._semaphore = asyncio.Semaphore(3)  # 最大允许 3 个并发下载任务
+        self._executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="jm_")
         self._pending_confirm: Dict[str, float] = {}  # delete all 二次确认
+        self._cleanup_tasks: Dict[str, asyncio.Task] = {}
+
+    def _schedule_pdf_cleanup(self, album_id: str, pdf_path: Path, zip_path: Path) -> None:
+        """后台挂起，5分钟后清理PDF（按需打包ZIP）"""
+        if album_id in self._cleanup_tasks:
+            self._cleanup_tasks[album_id].cancel()
+
+        async def cleanup() -> None:
+            try:
+                # 1. 立即将PDF打包为ZIP（如果还没打包过）
+                if pdf_path.exists() and not zip_path.exists():
+                    def do_zip():
+                        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                            zf.write(pdf_path, arcname=pdf_path.name)
+                    await asyncio.get_event_loop().run_in_executor(self._executor, do_zip)
+
+                # 2. 等待 5 分钟
+                await asyncio.sleep(300)
+
+                # 3. 时间到，删除原始 PDF 以释放空间
+                if pdf_path.exists():
+                    pdf_path.unlink(missing_ok=True)
+                    logger.info(f"[JMDownloader] 已清理 {album_id} 的原始 PDF，仅保留压缩包。")
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.error(f"[JMDownloader] 清理任务异常: {e}")
+
+        self._cleanup_tasks[album_id] = asyncio.create_task(cleanup())
 
         if _get_jmcomic() is None:
             logger.error(
@@ -215,15 +245,16 @@ class JmDownloaderPlugin(Star):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
-                return {"albums": {}, "disabled_groups": [], "blacklist_jm": [], "blacklist": []}
+                raise ValueError("JSON content is not a dict")
             data.setdefault("albums", {})
             data.setdefault("disabled_groups", [])
             data.setdefault("blacklist", [])
             data.setdefault("blacklist_jm", [])
+            data.setdefault("blacklist_tag", [])
             return data
-        except (json.JSONDecodeError, OSError) as e:
-            logger.error(f"[JMDownloader] 无法读取 downloads.json: {e}")
-            return {"albums": {}}
+        except Exception as e:
+            logger.error(f"[JMDownloader] 无法读取或解析 downloads.json: {e}")
+            raise RuntimeError(f"读取配置数据失败，防止覆盖原数据已中止操作: {e}")
 
     @staticmethod
     def _save_downloads(base_dir: Path, data: Dict[str, Any]) -> bool:
@@ -350,6 +381,28 @@ class JmDownloaderPlugin(Star):
         meta = self._load_downloads(base_dir)
         return meta.get("blacklist_jm", [])
 
+    def _set_blacklisted_tag(self, tag: str, add: bool) -> bool:
+        """添加/移除标签黑名单。"""
+        cfg = self._get_config()
+        base_dir = Path(cfg["download_base_dir"])
+        base_dir.mkdir(parents=True, exist_ok=True)
+        meta = self._load_downloads(base_dir)
+        tag_list = meta.setdefault("blacklist_tag", [])
+        if add:
+            if tag not in tag_list:
+                tag_list.append(tag)
+        else:
+            if tag in tag_list:
+                tag_list.remove(tag)
+        return self._save_downloads(base_dir, meta)
+
+    def _get_blacklisted_tags(self) -> List[str]:
+        """获取拉黑的标签列表。"""
+        cfg = self._get_config()
+        base_dir = Path(cfg["download_base_dir"])
+        meta = self._load_downloads(base_dir)
+        return meta.get("blacklist_tag", [])
+
     # ══════════════════════════════════════════════════════════
     #  下载与 PDF 转换（同步，在线程池中执行）
     # ══════════════════════════════════════════════════════════
@@ -384,54 +437,56 @@ class JmDownloaderPlugin(Star):
         title = album_id
 
         try:
-            # ── 步骤 1: 写极简 YAML 指定下载目录（避免 os.chdir 多线程竞态） ──
-            import yaml as _yaml_lib
-            _yml = tmp_dir / "_opt.yml"
-            _yml.write_text(
-                _yaml_lib.dump({"dir_rule": {"base_dir": str(tmp_dir)}},
-                               allow_unicode=True),
-                encoding="utf-8",
-            )
-            option = jmcomic.create_option_by_file(str(_yml))
-            jmcomic.download_album(album_id, option)
+            # ── 步骤 1: 内存生成 Option 并开启多线程 ──
+            # 采用 16 线程并发下载以提升速度，并配置 base_dir 保证路径不冲突
+            option_str = f"""
+download:
+  threading:
+    image: 16
+dir_rule:
+  base_dir: '{str(tmp_dir).replace('\\', '/')}'
+"""
+            option = jmcomic.create_option_by_str(option_str)
+            
+            client = option.build_jm_client()
+            album = client.get_album_detail(album_id)
+            
+            # 黑名单标签检查拦截
+            blacklisted_tags = self._get_blacklisted_tags()
+            if blacklisted_tags:
+                for tag in album.tags:
+                    if tag in blacklisted_tags:
+                        return {
+                            "success": False,
+                            "error": f"由于包含黑名单标签「{tag}」，拦截下载。",
+                            "title": album.title,
+                            "album_id": album_id,
+                        }
+            
+            jmcomic.download_album(album, option)
 
-            # ── 步骤 2: 平铺所有图片到目标目录 ──
+            # ── 步骤 2: 创建目标目录 ──
             target_dir = base_dir / album_id
             if target_dir.exists():
                 shutil.rmtree(target_dir)
             target_dir.mkdir(parents=True, exist_ok=True)
 
-            subdirs = sorted([
-                d for d in tmp_dir.iterdir()
-                if d.is_dir() and d.name != "__pycache__"
-            ])
+            # 尝试通过 tmp_dir 下的子目录名来获取真实的本子标题（如果有）
+            subdirs = sorted([d for d in tmp_dir.iterdir() if d.is_dir() and d.name != "__pycache__"])
             if subdirs:
                 title = subdirs[0].name
 
-            total_moved = 0
-            seen_names = set()
-            for sd in subdirs:
-                for f in sorted(sd.iterdir()):
-                    if f.is_file():
-                        dest_name = f.name
-                        if dest_name in seen_names:
-                            dest_name = f"{sd.name}_{f.name}"
-                        seen_names.add(dest_name)
-                        shutil.move(str(f), str(target_dir / dest_name))
-                        total_moved += 1
-                shutil.rmtree(sd)
+            # ── 步骤 3: 递归搜索所有图片并平铺移动 ──
+            image_extensions = (".webp", ".jpg", ".jpeg", ".png")
+            image_files_found = []
+            for ext in image_extensions:
+                image_files_found.extend(tmp_dir.rglob(f"*{ext}"))
+                image_files_found.extend(tmp_dir.rglob(f"*{ext.upper()}"))
 
-            for f in sorted(tmp_dir.iterdir()):
-                if f.is_file() and f.suffix.lower() in (".webp", ".jpg", ".jpeg", ".png"):
-                    shutil.move(str(f), str(target_dir / f.name))
-                    total_moved += 1
-
-            logger.info(
-                f"[JMDownloader] #{album_id} 下载完成，"
-                f"标题: {title}, 移动 {total_moved} 个文件"
-            )
-
-            if total_moved == 0:
+            # 去重
+            image_files_found = list(dict.fromkeys(image_files_found))
+            
+            if not image_files_found:
                 return {
                     "success": False,
                     "error": "下载后未找到任何图片文件",
@@ -439,25 +494,33 @@ class JmDownloaderPlugin(Star):
                     "album_id": album_id,
                 }
 
-            # ── 步骤 3: 扫描图片去重 ──
-            raw_files: List[Path] = []
-            for ext in (".webp", ".jpg", ".jpeg", ".png"):
-                raw_files.extend(target_dir.rglob(f"*{ext}"))
-                raw_files.extend(target_dir.rglob(f"*{ext.upper()}"))
-            image_files = list(dict.fromkeys(raw_files))
-            if not image_files:
-                return {
-                    "success": False,
-                    "error": "下载完成但未找到任何图片",
-                    "title": title,
-                    "album_id": album_id,
-                }
+            # ── 步骤 4: 健壮的自然排序 ──
+            def _natural_sort_key(p: Path) -> list:
+                return [int(text) if text.isdigit() else text.lower() 
+                        for text in re.split(r'(\d+)', p.stem)]
 
-            def _sort_key(p: Path) -> tuple:
-                nums = re.findall(r"\d+", p.stem)
-                return tuple(int(n) for n in nums) if nums else (0, p.stem)
+            image_files_sorted = sorted(image_files_found, key=_natural_sort_key)
 
-            image_files = sorted(image_files, key=_sort_key)
+            # ── 步骤 5: 移动图片到目标目录 ──
+            final_image_paths = []
+            seen_names = set()
+            for img_path in image_files_sorted:
+                dest_name = img_path.name
+                if dest_name in seen_names:
+                    # 如果有同名图片，前置其父目录名避免覆盖
+                    dest_name = f"{img_path.parent.name}_{dest_name}"
+                seen_names.add(dest_name)
+                
+                target_path = target_dir / dest_name
+                shutil.move(str(img_path), str(target_path))
+                final_image_paths.append(target_path)
+
+            logger.info(
+                f"[JMDownloader] #{album_id} 下载完成，"
+                f"标题: {title}, 提取并移动 {len(final_image_paths)} 张图片"
+            )
+
+            image_files = final_image_paths
             logger.info(
                 f"[JMDownloader] 找到 {len(image_files)} 张图片，生成 PDF..."
             )
@@ -498,6 +561,14 @@ class JmDownloaderPlugin(Star):
                 for img in images:
                     try:
                         img.close()
+                    except Exception:
+                        pass
+                
+                # ── 删除散图以释放一半磁盘空间 ──
+                for img_path in image_files:
+                    try:
+                        if os.path.exists(img_path):
+                            os.remove(img_path)
                     except Exception:
                         pass
 
@@ -612,7 +683,10 @@ class JmDownloaderPlugin(Star):
                 "  /jm black list    查看黑名单（管理员）\n"
                 "  /jm black_jm add <编号> 拉黑漫画（管理员）\n"
                 "  /jm black_jm remove <编号> 移除漫画拉黑（管理员）\n"
-                "  /jm black_jm list  查看已拉黑漫画（管理员）"
+                "  /jm black_jm list  查看已拉黑漫画（管理员）\n"
+                "  /jm black_tag add <标签> 拉黑包含该标签的漫画（管理员）\n"
+                "  /jm black_tag remove <标签> 移除标签拉黑（管理员）\n"
+                "  /jm black_tag list  查看已拉黑的标签（管理员）"
             )
             return
 
@@ -632,6 +706,9 @@ class JmDownloaderPlugin(Star):
                 yield result
         elif sub == "black_jm":
             async for result in self._handle_black_jm(event, args[1:]):
+                yield result
+        elif sub == "black_tag":
+            async for result in self._handle_black_tag(event, args[1:]):
                 yield result
         elif sub.isdigit():
             async for result in self._handle_download(event, sub):
@@ -682,8 +759,22 @@ class JmDownloaderPlugin(Star):
         base_dir.mkdir(parents=True, exist_ok=True)
         album_dir = base_dir / album_id
         pdf_path = album_dir / f"{album_id}.pdf"
+        zip_path = album_dir / f"{album_id}.zip"
 
-        # ── 已下载的漫画直接发送 ──
+        # ── 检查是否有缓存（ZIP 或 PDF） ──
+        if not pdf_path.exists() and zip_path.exists():
+            if cfg.get("progress_updates", True):
+                yield event.plain_result(f"⏳ 正在从压缩包中为您提取漫画 #{album_id}，请稍候...")
+            try:
+                def do_unzip():
+                    with zipfile.ZipFile(zip_path, 'r') as zf:
+                        zf.extract(pdf_path.name, path=album_dir)
+                await asyncio.get_event_loop().run_in_executor(self._executor, do_unzip)
+            except Exception as e:
+                logger.error(f"[JMDownloader] 解压 #{album_id} 异常: {e}")
+                yield event.plain_result(f"❌ 解压缓存文件失败: {e}")
+                return
+
         if pdf_path.exists():
             meta = self._load_downloads(base_dir)
             info = meta.get("albums", {}).get(album_id, {})
@@ -707,19 +798,25 @@ class JmDownloaderPlugin(Star):
                     f"文件路径: {pdf_path}\n"
                     f"[CQ:at,qq={sender_id}] 请联系管理员手动上传"
                 )
+            
+            # 无论成功与否，重置5分钟清理倒计时
+            self._schedule_pdf_cleanup(album_id, pdf_path, zip_path)
             return
 
         # ── 并发检查 ──
-        if self._lock.locked():
+        if self._semaphore.locked():
             yield event.plain_result(
-                "⏳ 已有下载任务在进行中，请稍后重试。"
+                "⏳ 当前下载队列已满（最大并发 3），请稍后重试。"
             )
             return
 
-        # ── 静默下载+转PDF+上传 ──
+        # ── 开始下载+转PDF+上传 ──
+        if cfg.get("progress_updates", True):
+            yield event.plain_result(f"⏳ 开始下载漫画 #{album_id}，请耐心等待...")
+
         loop = asyncio.get_event_loop()
 
-        async with self._lock:
+        async with self._semaphore:
             try:
                 result = await loop.run_in_executor(
                     self._executor,
@@ -772,6 +869,9 @@ class JmDownloaderPlugin(Star):
                 f"📁 文件: {pdf_path_str}\n"
                 f"[CQ:at,qq={sender_id}] 请联系管理员手动上传"
             )
+        
+        # 触发 5 分钟倒计时清理
+        self._schedule_pdf_cleanup(album_id, pdf_path, zip_path)
 
     # ══════════════════════════════════════════════════════════
     # ══════════════════════════════════════════════════════════
@@ -912,6 +1012,50 @@ class JmDownloaderPlugin(Star):
             act = "拉黑" if add else "移除拉黑"
             yield event.plain_result(
                 f"✅ 已{act}漫画 #{target}。" if ok else "❌ 操作失败。"
+            )
+        else:
+            yield event.plain_result(
+                f"❌ 未知操作: {action}。支持: add / remove / list"
+            )
+
+    # ══════════════════════════════════════════════════════════
+    #  /jm black_tag — 标签黑名单
+    # ══════════════════════════════════════════════════════════
+
+    async def _handle_black_tag(
+        self, event: AstrMessageEvent, args: List[str]
+    ):
+        """处理 /jm black_tag add|remove|list（管理员）。"""
+        if not self._is_admin(event):
+            yield event.plain_result("⛔ 仅管理员可使用此命令。")
+            return
+        if not args:
+            yield event.plain_result(
+                "用法:\n"
+                "  /jm black_tag add <标签>     拉黑标签\n"
+                "  /jm black_tag remove <标签>  移除标签拉黑\n"
+                "  /jm black_tag list           查看已拉黑标签"
+            )
+            return
+        action = args[0].lower()
+        if action == "list":
+            blacked = self._get_blacklisted_tags()
+            if not blacked:
+                yield event.plain_result("📭 没有拉黑的标签。")
+            else:
+                yield event.plain_result(
+                    f"🚫 已拉黑标签 ({len(blacked)}):\n" + ", ".join(blacked)
+                )
+        elif action in ("add", "remove"):
+            if len(args) < 2:
+                yield event.plain_result(f"用法: /jm black_tag {action} <标签>")
+                return
+            target = args[1]
+            add = (action == "add")
+            ok = self._set_blacklisted_tag(target, add)
+            act = "拉黑" if add else "移除拉黑"
+            yield event.plain_result(
+                f"✅ 已{act}标签: {target}。" if ok else "❌ 操作失败。"
             )
         else:
             yield event.plain_result(
