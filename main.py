@@ -211,13 +211,14 @@ class JmDownloaderPlugin(Star):
         """从 downloads.json 读取下载记录。"""
         path = base_dir / "downloads.json"
         if not path.exists():
-            return {"albums": {}, "disabled_groups": []}
+            return {"albums": {}, "disabled_groups": [], "blacklist": []}
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
-                return {"albums": {}, "disabled_groups": []}
+                return {"albums": {}, "disabled_groups": [], "blacklist": []}
             data.setdefault("albums", {})
             data.setdefault("disabled_groups", [])
+            data.setdefault("blacklist", [])
             return data
         except (json.JSONDecodeError, OSError) as e:
             logger.error(f"[JMDownloader] 无法读取 downloads.json: {e}")
@@ -287,6 +288,37 @@ class JmDownloaderPlugin(Star):
             if group_id not in disabled:
                 disabled.append(group_id)
         return self._save_downloads(base_dir, meta)
+
+    def _is_user_blacklisted(self, user_id: Optional[int]) -> bool:
+        """检查用户是否在黑名单中。"""
+        if user_id is None:
+            return False
+        cfg = self._get_config()
+        base_dir = Path(cfg["download_base_dir"])
+        meta = self._load_downloads(base_dir)
+        return str(user_id) in meta.get("blacklist", [])
+
+    def _set_user_blacklist(self, user_id: str, add: bool) -> bool:
+        """添加/移除用户黑名单。返回 True 表示操作成功。"""
+        cfg = self._get_config()
+        base_dir = Path(cfg["download_base_dir"])
+        base_dir.mkdir(parents=True, exist_ok=True)
+        meta = self._load_downloads(base_dir)
+        blacklist = meta.setdefault("blacklist", [])
+        if add:
+            if user_id not in blacklist:
+                blacklist.append(user_id)
+        else:
+            if user_id in blacklist:
+                blacklist.remove(user_id)
+        return self._save_downloads(base_dir, meta)
+
+    def _get_blacklist(self) -> List[str]:
+        """获取黑名单列表。"""
+        cfg = self._get_config()
+        base_dir = Path(cfg["download_base_dir"])
+        meta = self._load_downloads(base_dir)
+        return meta.get("blacklist", [])
 
     # ══════════════════════════════════════════════════════════
     #  下载与 PDF 转换（同步，在线程池中执行）
@@ -544,7 +576,10 @@ class JmDownloaderPlugin(Star):
                 "  /jm delete <编号>  删除指定漫画（管理员）\n"
                 "  /jm delete all     删除全部漫画（管理员）\n"
                 "  /jm group off <群号> 对该群禁用（管理员）\n"
-                "  /jm group on <群号>  对该群恢复（管理员）"
+                "  /jm group on <群号>  对该群恢复（管理员）\n"
+                "  /jm black add <QQ号> 拉黑用户（管理员）\n"
+                "  /jm black remove <QQ号> 移除拉黑（管理员）\n"
+                "  /jm black list    查看黑名单（管理员）"
             )
             return
 
@@ -558,6 +593,9 @@ class JmDownloaderPlugin(Star):
                 yield result
         elif sub == "group":
             async for result in self._handle_group(event, args[1:]):
+                yield result
+        elif sub == "black":
+            async for result in self._handle_black(event, args[1:]):
                 yield result
         elif sub.isdigit():
             async for result in self._handle_download(event, sub):
@@ -591,7 +629,10 @@ class JmDownloaderPlugin(Star):
         cfg = self._get_config()
         sender_id, group_id = await self._get_sender_info(event)
 
-        # 群聊黑名单检查
+        # 黑名单检查
+        if self._is_user_blacklisted(sender_id):
+            yield event.plain_result("⛔ 你已被管理员拉黑，无法使用此功能。")
+            return
         if self._is_group_disabled(group_id):
             yield event.plain_result("⛔ 本群已被管理员禁用此功能。")
             return
@@ -734,6 +775,59 @@ class JmDownloaderPlugin(Star):
         else:
             yield event.plain_result(
                 f"❌ 未知操作: {action}。支持: on / off"
+            )
+
+    # ══════════════════════════════════════════════════════════
+    #  /jm black — 用户黑名单管理
+    # ══════════════════════════════════════════════════════════
+
+    async def _handle_black(
+        self, event: AstrMessageEvent, args: List[str]
+    ):
+        """处理 /jm black add|remove|list（管理员）。"""
+        if not self._is_admin(event):
+            yield event.plain_result("⛔ 仅管理员可使用此命令。")
+            return
+
+        if not args:
+            yield event.plain_result(
+                "用法:\n"
+                "  /jm black add <QQ号>     拉黑用户\n"
+                "  /jm black remove <QQ号>  移除拉黑\n"
+                "  /jm black list           查看黑名单"
+            )
+            return
+
+        action = args[0].lower()
+
+        if action == "list":
+            blacklist = self._get_blacklist()
+            if not blacklist:
+                yield event.plain_result("📭 黑名单为空。")
+            else:
+                lines = [f"🚫 黑名单 ({len(blacklist)} 人):"]
+                for uid in blacklist:
+                    lines.append(f"  {uid}")
+                yield event.plain_result("\n".join(lines))
+        elif action in ("add", "remove"):
+            if len(args) < 2:
+                yield event.plain_result(
+                    f"用法: /jm black {action} <QQ号>"
+                )
+                return
+            target = args[1]
+            if not target.isdigit():
+                yield event.plain_result("❌ QQ 号必须是数字。")
+                return
+            add = (action == "add")
+            ok = self._set_user_blacklist(target, add)
+            act = "拉黑" if add else "移除拉黑"
+            yield event.plain_result(
+                f"✅ 已{act}用户 {target}。" if ok else "❌ 操作失败。"
+            )
+        else:
+            yield event.plain_result(
+                f"❌ 未知操作: {action}。支持: add / remove / list"
             )
 
     # ══════════════════════════════════════════════════════════
