@@ -463,7 +463,7 @@ dir_rule:
                             "album_id": album_id,
                         }
             
-            jmcomic.download_album(album, option)
+            jmcomic.download_album(album_id, option)
 
             # ── 步骤 2: 创建目标目录 ──
             target_dir = base_dir / album_id
