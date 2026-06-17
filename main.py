@@ -211,14 +211,15 @@ class JmDownloaderPlugin(Star):
         """从 downloads.json 读取下载记录。"""
         path = base_dir / "downloads.json"
         if not path.exists():
-            return {"albums": {}, "disabled_groups": [], "blacklist": []}
+            return {"albums": {}, "disabled_groups": [], "blacklist_jm": [], "blacklist": []}
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
-                return {"albums": {}, "disabled_groups": [], "blacklist": []}
+                return {"albums": {}, "disabled_groups": [], "blacklist_jm": [], "blacklist": []}
             data.setdefault("albums", {})
             data.setdefault("disabled_groups", [])
             data.setdefault("blacklist", [])
+            data.setdefault("blacklist_jm", [])
             return data
         except (json.JSONDecodeError, OSError) as e:
             logger.error(f"[JMDownloader] 无法读取 downloads.json: {e}")
@@ -319,6 +320,35 @@ class JmDownloaderPlugin(Star):
         base_dir = Path(cfg["download_base_dir"])
         meta = self._load_downloads(base_dir)
         return meta.get("blacklist", [])
+
+    def _is_jm_blacklisted(self, album_id: str) -> bool:
+        """检查漫画编号是否被拉黑。"""
+        cfg = self._get_config()
+        base_dir = Path(cfg["download_base_dir"])
+        meta = self._load_downloads(base_dir)
+        return album_id in meta.get("blacklist_jm", [])
+
+    def _set_blacklisted_jm(self, album_id: str, add: bool) -> bool:
+        """添加/移除漫画编号黑名单。"""
+        cfg = self._get_config()
+        base_dir = Path(cfg["download_base_dir"])
+        base_dir.mkdir(parents=True, exist_ok=True)
+        meta = self._load_downloads(base_dir)
+        jm_list = meta.setdefault("blacklist_jm", [])
+        if add:
+            if album_id not in jm_list:
+                jm_list.append(album_id)
+        else:
+            if album_id in jm_list:
+                jm_list.remove(album_id)
+        return self._save_downloads(base_dir, meta)
+
+    def _get_blacklisted_jm(self) -> List[str]:
+        """获取拉黑的漫画编号列表。"""
+        cfg = self._get_config()
+        base_dir = Path(cfg["download_base_dir"])
+        meta = self._load_downloads(base_dir)
+        return meta.get("blacklist_jm", [])
 
     # ══════════════════════════════════════════════════════════
     #  下载与 PDF 转换（同步，在线程池中执行）
@@ -579,7 +609,10 @@ class JmDownloaderPlugin(Star):
                 "  /jm group on <群号>  对该群恢复（管理员）\n"
                 "  /jm black add <QQ号> 拉黑用户（管理员）\n"
                 "  /jm black remove <QQ号> 移除拉黑（管理员）\n"
-                "  /jm black list    查看黑名单（管理员）"
+                "  /jm black list    查看黑名单（管理员）\n"
+                "  /jm black_jm add <编号> 拉黑漫画（管理员）\n"
+                "  /jm black_jm remove <编号> 移除漫画拉黑（管理员）\n"
+                "  /jm black_jm list  查看已拉黑漫画（管理员）"
             )
             return
 
@@ -596,6 +629,9 @@ class JmDownloaderPlugin(Star):
                 yield result
         elif sub == "black":
             async for result in self._handle_black(event, args[1:]):
+                yield result
+        elif sub == "black_jm":
+            async for result in self._handle_black_jm(event, args[1:]):
                 yield result
         elif sub.isdigit():
             async for result in self._handle_download(event, sub):
@@ -635,6 +671,11 @@ class JmDownloaderPlugin(Star):
             return
         if self._is_group_disabled(group_id):
             yield event.plain_result("⛔ 本群已被管理员禁用此功能。")
+            return
+        if self._is_jm_blacklisted(album_id):
+            yield event.plain_result(
+                f"⛔ 漫画 #{album_id} 已被管理员禁止下载。"
+            )
             return
 
         base_dir = Path(cfg["download_base_dir"])
@@ -824,6 +865,53 @@ class JmDownloaderPlugin(Star):
             act = "拉黑" if add else "移除拉黑"
             yield event.plain_result(
                 f"✅ 已{act}用户 {target}。" if ok else "❌ 操作失败。"
+            )
+        else:
+            yield event.plain_result(
+                f"❌ 未知操作: {action}。支持: add / remove / list"
+            )
+
+    # ══════════════════════════════════════════════════════════
+    #  /jm black_jm — 漫画编号黑名单
+    # ══════════════════════════════════════════════════════════
+
+    async def _handle_black_jm(
+        self, event: AstrMessageEvent, args: List[str]
+    ):
+        """处理 /jm black_jm add|remove|list（管理员）。"""
+        if not self._is_admin(event):
+            yield event.plain_result("⛔ 仅管理员可使用此命令。")
+            return
+        if not args:
+            yield event.plain_result(
+                "用法:\n"
+                "  /jm black_jm add <编号>     拉黑漫画\n"
+                "  /jm black_jm remove <编号>  移除拉黑\n"
+                "  /jm black_jm list           查看已拉黑漫画"
+            )
+            return
+        action = args[0].lower()
+        if action == "list":
+            blacked = self._get_blacklisted_jm()
+            if not blacked:
+                yield event.plain_result("📭 没有拉黑的漫画。")
+            else:
+                yield event.plain_result(
+                    f"🚫 已拉黑漫画 ({len(blacked)}):\n" + ", ".join(blacked)
+                )
+        elif action in ("add", "remove"):
+            if len(args) < 2:
+                yield event.plain_result(f"用法: /jm black_jm {action} <编号>")
+                return
+            target = args[1]
+            if not target.isdigit():
+                yield event.plain_result("❌ 编号必须是数字。")
+                return
+            add = (action == "add")
+            ok = self._set_blacklisted_jm(target, add)
+            act = "拉黑" if add else "移除拉黑"
+            yield event.plain_result(
+                f"✅ 已{act}漫画 #{target}。" if ok else "❌ 操作失败。"
             )
         else:
             yield event.plain_result(

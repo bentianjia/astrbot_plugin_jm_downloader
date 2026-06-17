@@ -36,6 +36,14 @@ pip install jmcomic Pillow
 | `/jm group off <群号>` | 对该群禁用 JM 下载 |
 | `/jm group on <群号>` | 对该群恢复使用 |
 
+### 漫画编号黑名单（仅管理员）
+
+| 命令 | 说明 |
+|------|------|
+| `/jm black_jm add <编号>` | 拉黑漫画，禁止任何人下载 |
+| `/jm black_jm remove <编号>` | 移除漫画拉黑 |
+| `/jm black_jm list` | 查看已拉黑漫画 |
+
 ### 用户黑名单（仅管理员）
 
 | 命令 | 说明 |
