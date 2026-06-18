@@ -238,10 +238,10 @@ class JmDownloaderPlugin(Star):
 
     @staticmethod
     def _load_downloads(base_dir: Path) -> Dict[str, Any]:
-        """从 downloads.json 读取下载记录。"""
+        """从 downloads.json 读取下载记录。自动迁移旧格式的列表到多重作用域字典。"""
         path = base_dir / "downloads.json"
         if not path.exists():
-            return {"albums": {}, "disabled_groups": [], "blacklist_jm": [], "blacklist": []}
+            return {"albums": {}, "disabled_groups": [], "blacklist_jm": {"global": [], "group": {}, "user": {}}, "blacklist": [], "blacklist_tag": {"global": [], "group": {}, "user": {}}}
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
@@ -249,8 +249,17 @@ class JmDownloaderPlugin(Star):
             data.setdefault("albums", {})
             data.setdefault("disabled_groups", [])
             data.setdefault("blacklist", [])
-            data.setdefault("blacklist_jm", [])
-            data.setdefault("blacklist_tag", [])
+            
+            for key in ["blacklist_jm", "blacklist_tag"]:
+                val = data.get(key)
+                if isinstance(val, list):
+                    data[key] = {"global": val, "group": {}, "user": {}}
+                elif isinstance(val, dict):
+                    data[key].setdefault("global", [])
+                    data[key].setdefault("group", {})
+                    data[key].setdefault("user", {})
+                else:
+                    data[key] = {"global": [], "group": {}, "user": {}}
             return data
         except Exception as e:
             logger.error(f"[JMDownloader] 无法读取或解析 downloads.json: {e}")
@@ -352,56 +361,71 @@ class JmDownloaderPlugin(Star):
         meta = self._load_downloads(base_dir)
         return meta.get("blacklist", [])
 
-    def _is_jm_blacklisted(self, album_id: str) -> bool:
-        """检查漫画编号是否被拉黑。"""
-        cfg = self._get_config()
-        base_dir = Path(cfg["download_base_dir"])
-        meta = self._load_downloads(base_dir)
-        return album_id in meta.get("blacklist_jm", [])
-
-    def _set_blacklisted_jm(self, album_id: str, add: bool) -> bool:
-        """添加/移除漫画编号黑名单。"""
+    def _update_blacklist(self, key_name: str, scope: str, target_id: Optional[str], item: Optional[str], action: str) -> bool:
+        """统一管理作用域黑名单字典。action: add, remove, remove_all"""
         cfg = self._get_config()
         base_dir = Path(cfg["download_base_dir"])
         base_dir.mkdir(parents=True, exist_ok=True)
         meta = self._load_downloads(base_dir)
-        jm_list = meta.setdefault("blacklist_jm", [])
-        if add:
-            if album_id not in jm_list:
-                jm_list.append(album_id)
-        else:
-            if album_id in jm_list:
-                jm_list.remove(album_id)
+        
+        bdict = meta.setdefault(key_name, {"global": [], "group": {}, "user": {}})
+        if scope == "global":
+            lst = bdict.setdefault("global", [])
+            if action == "add" and item and item not in lst:
+                lst.append(item)
+            elif action == "remove" and item and item in lst:
+                lst.remove(item)
+            elif action == "remove_all":
+                bdict["global"] = []
+        elif scope in ["group", "user"]:
+            if not target_id: return False
+            scope_dict = bdict.setdefault(scope, {})
+            if action == "remove_all":
+                scope_dict.pop(target_id, None)
+            else:
+                lst = scope_dict.setdefault(target_id, [])
+                if action == "add" and item and item not in lst:
+                    lst.append(item)
+                elif action == "remove" and item and item in lst:
+                    lst.remove(item)
         return self._save_downloads(base_dir, meta)
 
-    def _get_blacklisted_jm(self) -> List[str]:
-        """获取拉黑的漫画编号列表。"""
+    def _get_blacklist_items(self, key_name: str, scope: str, target_id: Optional[str]) -> List[str]:
+        """获取指定作用域的黑名单列表"""
         cfg = self._get_config()
         base_dir = Path(cfg["download_base_dir"])
         meta = self._load_downloads(base_dir)
-        return meta.get("blacklist_jm", [])
+        bdict = meta.get(key_name, {"global": [], "group": {}, "user": {}})
+        if scope == "global":
+            return bdict.get("global", [])
+        elif scope in ["group", "user"]:
+            if not target_id: return []
+            return bdict.get(scope, {}).get(target_id, [])
+        return []
 
-    def _set_blacklisted_tag(self, tag: str, add: bool) -> bool:
-        """添加/移除标签黑名单。"""
+    def _is_jm_blacklisted(self, album_id: str, sender_id: Optional[int], group_id: Optional[int]) -> bool:
+        """检查漫画编号是否被拉黑。综合 global、group、user"""
         cfg = self._get_config()
         base_dir = Path(cfg["download_base_dir"])
-        base_dir.mkdir(parents=True, exist_ok=True)
         meta = self._load_downloads(base_dir)
-        tag_list = meta.setdefault("blacklist_tag", [])
-        if add:
-            if tag not in tag_list:
-                tag_list.append(tag)
-        else:
-            if tag in tag_list:
-                tag_list.remove(tag)
-        return self._save_downloads(base_dir, meta)
+        bm = meta.get("blacklist_jm", {"global": [], "group": {}, "user": {}})
+        if album_id in bm.get("global", []): return True
+        if group_id is not None and album_id in bm.get("group", {}).get(str(group_id), []): return True
+        if sender_id is not None and album_id in bm.get("user", {}).get(str(sender_id), []): return True
+        return False
 
-    def _get_blacklisted_tags(self) -> List[str]:
-        """获取拉黑的标签列表。"""
+    def _get_combined_blacklisted_tags(self, sender_id: Optional[int], group_id: Optional[int]) -> List[str]:
+        """获取当前环境综合生效的标签黑名单（并集）"""
         cfg = self._get_config()
         base_dir = Path(cfg["download_base_dir"])
         meta = self._load_downloads(base_dir)
-        return meta.get("blacklist_tag", [])
+        bt = meta.get("blacklist_tag", {"global": [], "group": {}, "user": {}})
+        tags = set(bt.get("global", []))
+        if group_id is not None:
+            tags.update(bt.get("group", {}).get(str(group_id), []))
+        if sender_id is not None:
+            tags.update(bt.get("user", {}).get(str(sender_id), []))
+        return list(tags)
 
     # ══════════════════════════════════════════════════════════
     #  下载与 PDF 转换（同步，在线程池中执行）
@@ -412,6 +436,8 @@ class JmDownloaderPlugin(Star):
         album_id: str,
         base_dir: Path,
         pdf_quality: int,
+        sender_id: Optional[int] = None,
+        group_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         同步函数：下载漫画 → 收集图片 → 合并为 PDF。
@@ -452,7 +478,7 @@ dir_rule:
             album = client.get_album_detail(album_id)
             
             # 黑名单标签检查拦截
-            blacklisted_tags = self._get_blacklisted_tags()
+            blacklisted_tags = self._get_combined_blacklisted_tags(sender_id, group_id)
             if blacklisted_tags:
                 for tag in album.tags:
                     if tag in blacklisted_tags:
@@ -749,9 +775,9 @@ dir_rule:
         if self._is_group_disabled(group_id):
             yield event.plain_result("⛔ 本群已被管理员禁用此功能。")
             return
-        if self._is_jm_blacklisted(album_id):
+        if self._is_jm_blacklisted(album_id, sender_id, group_id):
             yield event.plain_result(
-                f"⛔ 漫画 #{album_id} 已被管理员禁止下载。"
+                f"⛔ 漫画 #{album_id} 已在当前环境中被禁止下载。"
             )
             return
 
@@ -824,6 +850,8 @@ dir_rule:
                     album_id,
                     base_dir,
                     cfg["pdf_quality"],
+                    sender_id,
+                    group_id,
                 )
             except Exception as e:
                 logger.error(f"[JMDownloader] 下载 #{album_id} 异常: {e}")
@@ -975,48 +1003,74 @@ dir_rule:
     #  /jm black_jm — 漫画编号黑名单
     # ══════════════════════════════════════════════════════════
 
-    async def _handle_black_jm(
-        self, event: AstrMessageEvent, args: List[str]
-    ):
-        """处理 /jm black_jm add|remove|list（管理员）。"""
+    def _parse_blacklist_cmd(self, args: List[str]) -> Tuple[str, str, Optional[str], Optional[str]]:
+        """解析多作用域的黑名单指令。
+        返回: (action, scope, target_id, item)
+        """
+        action = args[0].lower()
+        if len(args) < 2: return action, "", None, None
+        scope = args[1].lower()
+        if scope not in ["global", "group", "user"]:
+            return action, "", None, None
+            
+        if scope == "global":
+            item = args[2] if len(args) > 2 else None
+            return action, scope, None, item
+        else:
+            if len(args) < 3: return action, scope, None, None
+            target_id = args[2]
+            item = args[3] if len(args) > 3 else None
+            return action, scope, target_id, item
+
+    async def _handle_blacklist_common(self, event: AstrMessageEvent, args: List[str], cmd_name: str, key_name: str):
         if not self._is_admin(event):
             yield event.plain_result("⛔ 仅管理员可使用此命令。")
             return
         if not args:
             yield event.plain_result(
-                "用法:\n"
-                "  /jm black_jm add <编号>     拉黑漫画\n"
-                "  /jm black_jm remove <编号>  移除拉黑\n"
-                "  /jm black_jm list           查看已拉黑漫画"
+                f"用法:\n"
+                f"  /jm {cmd_name} add|remove global <目标>\n"
+                f"  /jm {cmd_name} add|remove group|user <群号/QQ号> <目标>\n"
+                f"  /jm {cmd_name} list global\n"
+                f"  /jm {cmd_name} list group|user <群号/QQ号>\n"
+                f"  /jm {cmd_name} remove_all global confirm\n"
+                f"  /jm {cmd_name} remove_all group|user <群号/QQ号> confirm"
             )
             return
-        action = args[0].lower()
+
+        action, scope, target_id, item = self._parse_blacklist_cmd(args)
+        if not scope:
+            yield event.plain_result("❌ 必须指定作用域：global, group, 或 user。")
+            return
+
         if action == "list":
-            blacked = self._get_blacklisted_jm()
+            blacked = self._get_blacklist_items(key_name, scope, target_id)
             if not blacked:
-                yield event.plain_result("📭 没有拉黑的漫画。")
+                yield event.plain_result(f"📭 {scope} 作用域下暂无限制。")
             else:
-                yield event.plain_result(
-                    f"🚫 已拉黑漫画 ({len(blacked)}):\n" + ", ".join(blacked)
-                )
-        elif action in ("add", "remove"):
-            if len(args) < 2:
-                yield event.plain_result(f"用法: /jm black_jm {action} <编号>")
+                yield event.plain_result(f"🚫 {scope} 已拉黑 ({len(blacked)}):\n" + ", ".join(blacked))
+        elif action in ["add", "remove"]:
+            if not item:
+                yield event.plain_result("❌ 缺少目标内容。")
                 return
-            target = args[1]
-            if not target.isdigit():
-                yield event.plain_result("❌ 编号必须是数字。")
+            ok = self._update_blacklist(key_name, scope, target_id, item, action)
+            act = "添加拉黑" if action == "add" else "移除拉黑"
+            yield event.plain_result(f"✅ {scope} 作用域已{act}: {item}。" if ok else "❌ 操作失败。")
+        elif action == "remove_all":
+            if item != "confirm":
+                yield event.plain_result("⚠️ 危险操作！清空该作用域下所有限制，请在末尾加上 confirm 以确认。\n例如: remove_all global confirm")
                 return
-            add = (action == "add")
-            ok = self._set_blacklisted_jm(target, add)
-            act = "拉黑" if add else "移除拉黑"
-            yield event.plain_result(
-                f"✅ 已{act}漫画 #{target}。" if ok else "❌ 操作失败。"
-            )
+            ok = self._update_blacklist(key_name, scope, target_id, None, "remove_all")
+            yield event.plain_result(f"✅ 已清空 {scope} 作用域的所有限制。" if ok else "❌ 操作失败。")
         else:
-            yield event.plain_result(
-                f"❌ 未知操作: {action}。支持: add / remove / list"
-            )
+            yield event.plain_result(f"❌ 未知操作: {action}。支持: add / remove / list / remove_all")
+
+    async def _handle_black_jm(
+        self, event: AstrMessageEvent, args: List[str]
+    ):
+        """处理 /jm black_jm（管理员）。"""
+        async for r in self._handle_blacklist_common(event, args, "black_jm", "blacklist_jm"):
+            yield r
 
     # ══════════════════════════════════════════════════════════
     #  /jm black_tag — 标签黑名单
@@ -1025,42 +1079,9 @@ dir_rule:
     async def _handle_black_tag(
         self, event: AstrMessageEvent, args: List[str]
     ):
-        """处理 /jm black_tag add|remove|list（管理员）。"""
-        if not self._is_admin(event):
-            yield event.plain_result("⛔ 仅管理员可使用此命令。")
-            return
-        if not args:
-            yield event.plain_result(
-                "用法:\n"
-                "  /jm black_tag add <标签>     拉黑标签\n"
-                "  /jm black_tag remove <标签>  移除标签拉黑\n"
-                "  /jm black_tag list           查看已拉黑标签"
-            )
-            return
-        action = args[0].lower()
-        if action == "list":
-            blacked = self._get_blacklisted_tags()
-            if not blacked:
-                yield event.plain_result("📭 没有拉黑的标签。")
-            else:
-                yield event.plain_result(
-                    f"🚫 已拉黑标签 ({len(blacked)}):\n" + ", ".join(blacked)
-                )
-        elif action in ("add", "remove"):
-            if len(args) < 2:
-                yield event.plain_result(f"用法: /jm black_tag {action} <标签>")
-                return
-            target = args[1]
-            add = (action == "add")
-            ok = self._set_blacklisted_tag(target, add)
-            act = "拉黑" if add else "移除拉黑"
-            yield event.plain_result(
-                f"✅ 已{act}标签: {target}。" if ok else "❌ 操作失败。"
-            )
-        else:
-            yield event.plain_result(
-                f"❌ 未知操作: {action}。支持: add / remove / list"
-            )
+        """处理 /jm black_tag（管理员）。"""
+        async for r in self._handle_blacklist_common(event, args, "black_tag", "blacklist_tag"):
+            yield r
 
     # ══════════════════════════════════════════════════════════
     #  /jm list — 列出所有下载

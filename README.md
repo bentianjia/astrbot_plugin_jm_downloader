@@ -52,13 +52,15 @@ pip install jmcomic Pillow
 | `/jm black remove <QQ号>` | 移除拉黑 |
 | `/jm black list` | 查看黑名单 |
 
-### 标签黑名单（仅管理员）
+### 标签黑名单（仅管理员，支持多作用域）
+_作用域支持：`global`(全局)、`group <群号>`、`user <QQ号>`_
 
 | 命令 | 说明 |
 |------|------|
-| `/jm black_tag add <标签>` | 拉黑包含该标签的漫画，并在下载前自动拦截 |
-| `/jm black_tag remove <标签>` | 移除标签拉黑 |
-| `/jm black_tag list` | 查看已拉黑的标签列表 |
+| `/jm black_tag add <作用域> <标签>` | 拉黑包含该标签的漫画，并在下载前自动拦截 |
+| `/jm black_tag remove <作用域> <标签>` | 移除指定作用域的标签拉黑 |
+| `/jm black_tag list <作用域>` | 查看该作用域已拉黑的标签 |
+| `/jm black_tag remove_all <作用域> confirm` | 一键清空该作用域的所有黑名单限制 |
 
 ## 特性
 
