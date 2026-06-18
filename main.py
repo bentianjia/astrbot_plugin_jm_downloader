@@ -1007,8 +1007,14 @@ dir_rule:
         """解析多作用域的黑名单指令。
         返回: (action, scope, target_id, item)
         """
+        if not args: return "", "", None, None
+        if len(args) < 2: return args[0].lower(), "", None, None
+        
+        # 容错处理：允许将 scope 和 action 写反，例如 "global list" 或 "global add"
+        if args[0].lower() in ["global", "group", "user"] and args[1].lower() in ["add", "remove", "list", "remove_all"]:
+            args[0], args[1] = args[1], args[0]
+
         action = args[0].lower()
-        if len(args) < 2: return action, "", None, None
         scope = args[1].lower()
         if scope not in ["global", "group", "user"]:
             return action, "", None, None
