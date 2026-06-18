@@ -1049,25 +1049,27 @@ dir_rule:
             yield event.plain_result("❌ 必须指定作用域：global, group, 或 user。")
             return
 
+        scope_disp = "全局" if scope == "global" else (f"群聊 {target_id}" if scope == "group" else f"用户 {target_id}")
+
         if action == "list":
             blacked = self._get_blacklist_items(key_name, scope, target_id)
             if not blacked:
-                yield event.plain_result(f"📭 {scope} 作用域下暂无限制。")
+                yield event.plain_result(f"📭 {scope_disp} 暂无限制。")
             else:
-                yield event.plain_result(f"🚫 {scope} 已拉黑 ({len(blacked)}):\n" + ", ".join(blacked))
+                yield event.plain_result(f"🚫 {scope_disp} 已拉黑 ({len(blacked)}):\n" + ", ".join(blacked))
         elif action in ["add", "remove"]:
             if not item:
                 yield event.plain_result("❌ 缺少目标内容。")
                 return
             ok = self._update_blacklist(key_name, scope, target_id, item, action)
             act = "添加拉黑" if action == "add" else "移除拉黑"
-            yield event.plain_result(f"✅ {scope} 作用域已{act}: {item}。" if ok else "❌ 操作失败。")
+            yield event.plain_result(f"✅ {scope_disp} 已{act}: {item}。" if ok else "❌ 操作失败。")
         elif action == "remove_all":
             if item != "confirm":
-                yield event.plain_result("⚠️ 危险操作！清空该作用域下所有限制，请在末尾加上 confirm 以确认。\n例如: remove_all global confirm")
+                yield event.plain_result(f"⚠️ 危险操作！清空 {scope_disp} 的所有限制，请在末尾加上 confirm 以确认。\n例如: remove_all {scope} {target_id + ' ' if target_id else ''}confirm")
                 return
             ok = self._update_blacklist(key_name, scope, target_id, None, "remove_all")
-            yield event.plain_result(f"✅ 已清空 {scope} 作用域的所有限制。" if ok else "❌ 操作失败。")
+            yield event.plain_result(f"✅ 已清空 {scope_disp} 的所有限制。" if ok else "❌ 操作失败。")
         else:
             yield event.plain_result(f"❌ 未知操作: {action}。支持: add / remove / list / remove_all")
 
