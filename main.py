@@ -78,6 +78,7 @@ class JmDownloaderPlugin(Star):
         self._executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="jm_")
         self._pending_confirm: Dict[str, float] = {}  # delete all 二次确认
         self._cleanup_tasks: Dict[str, asyncio.Task] = {}
+        self.search_context = {}  # 保存用户的搜索上下文 (sender_id, group_id) -> query
 
     def _schedule_pdf_cleanup(self, album_id: str, pdf_path: Path, zip_path: Path) -> None:
         """后台挂起，5分钟后清理PDF（按需打包ZIP）"""
