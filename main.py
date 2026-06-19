@@ -869,38 +869,52 @@ dir_rule:
             yield event.plain_result(msg)
             return
             
-        lines = [f"🔍 搜索「{query}」结果 (第 {page} 页):"]
-        for aid, title in sorted(items, key=lambda x: int(x[0]), reverse=True):
-            lines.append(f"📦 [{aid}] {title}")
-            
-        if res["filtered"] > 0:
-            lines.append(f"\\n🛡️ 自动拦截了 {res['filtered']} 个包含违禁标签/黑名单的结果。")
-            
-        lines.append(f"💡 下载发送 /jm <编号>，下一页发送 /jm page {page + 1}")
-        text = "\n".join(lines)
-        
-        # 获取第一条结果的封面
+        # 并发获取所有结果的封面
         try:
-            first_aid = items[0][0]
             cfg = self._get_config()
-            base_dir = Path(cfg["download_base_dir"])
+            base_dir = Path(cfg["download_base_dir"]).absolute()
             base_dir.mkdir(parents=True, exist_ok=True)
-            cover_path = str(base_dir / f"cover_search_{first_aid}.jpg")
             
-            def _download_cover():
+            def _download_all_covers():
                 client = jmcomic.JmOption.default().build_jm_client()
-                client.download_album_cover(first_aid, cover_path)
-                
-            await loop.run_in_executor(self._executor, _download_cover)
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                    for aid, _ in items:
+                        cover_path = str(base_dir / f"cover_search_{aid}.jpg")
+                        if not Path(cover_path).exists():
+                            executor.submit(client.download_album_cover, aid, cover_path)
+                            
+            await loop.run_in_executor(self._executor, _download_all_covers)
             
-            if Path(cover_path).exists():
-                yield event.make_result().file_image(cover_path).message(text)
-                return
+            result = event.make_result()
+            
+            info_text = f"🔍 搜索「{query}」结果 (第 {page} 页):\n"
+            if res["filtered"] > 0:
+                info_text += f"🛡️ 自动拦截了 {res['filtered']} 个包含违禁词/黑名单的结果。\n"
+            result.message(info_text)
+            
+            sorted_items = sorted(items, key=lambda x: int(x[0]), reverse=True)
+            for aid, title in sorted_items:
+                result.message(f"\n📦 [{aid}] {title}\n")
+                cover_path = str(base_dir / f"cover_search_{aid}.jpg")
+                if Path(cover_path).exists():
+                    result.file_image(cover_path)
+                    
+            result.message(f"\n💡 下载发送 /jm <编号>，下一页发送 /jm page {page + 1}")
+            yield result
+            return
+            
         except Exception as e:
             logger.error(f"[JMDownloader] 获取封面失败: {e}")
             
-        # 如果获取封面失败，回退到纯文本
-        yield event.plain_result(text)
+        # 回退逻辑
+        lines = [f"🔍 搜索「{query}」结果 (第 {page} 页):"]
+        for aid, title in sorted(items, key=lambda x: int(x[0]), reverse=True):
+            lines.append(f"📦 [{aid}] {title}")
+        if res["filtered"] > 0:
+            lines.append(f"\n🛡️ 自动拦截了 {res['filtered']} 个包含违禁词/黑名单的结果。")
+        lines.append(f"💡 下载发送 /jm <编号>，下一页发送 /jm page {page + 1}")
+        yield event.plain_result("\n".join(lines))
 
     # ══════════════════════════════════════════════════════════
     #  /jm batch — 批量下载
