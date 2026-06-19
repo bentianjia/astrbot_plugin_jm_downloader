@@ -864,8 +864,7 @@ dir_rule:
         if not items:
             msg = f"📭 「{query}」第 {page} 页没有找到可用结果。"
             if res["filtered"] > 0:
-                msg += f"
-(拦截了 {res['filtered']} 个包含违禁词的本子)"
+                msg += f"\\n(拦截了 {res['filtered']} 个包含违禁词的本子)"
             yield event.plain_result(msg)
             return
             
@@ -874,8 +873,7 @@ dir_rule:
             lines.append(f"📦 [{aid}] {title}")
             
         if res["filtered"] > 0:
-            lines.append(f"
-🛡️ 自动拦截了 {res['filtered']} 个包含违禁标签/黑名单的结果。")
+            lines.append(f"\\n🛡️ 自动拦截了 {res['filtered']} 个包含违禁标签/黑名单的结果。")
             
         lines.append(f"💡 下载发送 /jm <编号>，下一页发送 /jm page {page + 1}")
         text = "\n".join(lines)
