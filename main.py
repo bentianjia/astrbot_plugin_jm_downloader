@@ -250,6 +250,8 @@ class JmDownloaderPlugin(Star):
             data.setdefault("disabled_groups", [])
             data.setdefault("blacklist", [])
             
+            data.setdefault("batch_enabled", True)
+            data.setdefault("batch_max", 10)
             for key in ["blacklist_jm", "blacklist_tag"]:
                 val = data.get(key)
                 if isinstance(val, list):
@@ -736,6 +738,12 @@ dir_rule:
         elif sub == "black_tag":
             async for result in self._handle_black_tag(event, args[1:]):
                 yield result
+        elif sub == "search":
+            async for result in self._handle_search(event, args[1:]):
+                yield result
+        elif sub == "batch":
+            async for result in self._handle_batch(event, args[1:]):
+                yield result
         elif sub.isdigit():
             async for result in self._handle_download(event, sub):
                 yield result
@@ -744,6 +752,183 @@ dir_rule:
                 f"❌ 未知子命令: {sub}\n"
                 f"请输入 /jm 查看帮助。"
             )
+
+    # ══════════════════════════════════════════════════════════
+    #  /jm search — 搜索漫画
+    # ══════════════════════════════════════════════════════════
+
+    async def _handle_search(self, event: AstrMessageEvent, args: List[str]):
+        """处理 /jm search 关键词... [页码] 命令"""
+        if not args:
+            yield event.plain_result("❌ 请输入搜索关键词。用法: /jm search 关键词 [页码]")
+            return
+            
+        # 解析关键词和页码
+        page = 1
+        if args[-1].isdigit():
+            page = int(args[-1])
+            query = " ".join(args[:-1])
+        else:
+            query = " ".join(args)
+            
+        if not query:
+            yield event.plain_result("❌ 请输入有效的搜索关键词。")
+            return
+
+        jmcomic = _get_jmcomic()
+        if not jmcomic:
+            yield event.plain_result("❌ jmcomic 库未安装。")
+            return
+
+        yield event.plain_result(f"🔍 正在搜索「{query}」第 {page} 页，并校验违禁词，请稍候...")
+        
+        loop = asyncio.get_event_loop()
+        sender_id, group_id = await self._get_sender_info(event)
+        blacklisted_tags = self._get_combined_blacklisted_tags(sender_id, group_id)
+        
+        def _do_search():
+            client = jmcomic.JmOption.default().build_jm_client()
+            search_page = client.search_site(query, page=page)
+            
+            raw_items = list(search_page.iter_id_title_tag())
+            if not raw_items:
+                return {"items": [], "filtered": 0, "total": 0}
+                
+            # 我们只取前 15 个结果进行校验，避免接口请求过多
+            items_to_check = raw_items[:15]
+            valid_results = []
+            filtered_count = 0
+            
+            # 并发获取详细信息以检查 tags
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                # 提交所有请求
+                future_to_item = {
+                    executor.submit(client.get_album_detail, item[0]): item
+                    for item in items_to_check
+                }
+                
+                for future in concurrent.futures.as_completed(future_to_item):
+                    item = future_to_item[future]
+                    try:
+                        album_detail = future.result()
+                        # 校验黑名单
+                        is_safe = True
+                        if blacklisted_tags:
+                            for t in album_detail.tags:
+                                if t in blacklisted_tags:
+                                    is_safe = False
+                                    break
+                                    
+                        if self._is_jm_blacklisted(item[0], sender_id, group_id):
+                            is_safe = False
+                            
+                        if is_safe:
+                            valid_results.append((item[0], item[1]))
+                        else:
+                            filtered_count += 1
+                    except Exception as e:
+                        logger.error(f"[JMDownloader] 搜索校验异常 {item[0]}: {e}")
+                        
+            return {"items": valid_results, "filtered": filtered_count, "total": len(raw_items)}
+
+        try:
+            res = await loop.run_in_executor(self._executor, _do_search)
+        except Exception as e:
+            logger.error(f"[JMDownloader] 搜索失败: {e}")
+            yield event.plain_result(f"❌ 搜索请求失败: {e}")
+            return
+            
+        items = res["items"]
+        if not items:
+            msg = f"📭 「{query}」第 {page} 页没有找到可用结果。"
+            if res["filtered"] > 0:
+                msg += f"
+(拦截了 {res['filtered']} 个包含违禁词的本子)"
+            yield event.plain_result(msg)
+            return
+            
+        lines = [f"🔍 搜索「{query}」结果 (第 {page} 页):"]
+        for aid, title in sorted(items, key=lambda x: int(x[0]), reverse=True):
+            lines.append(f"📦 [{aid}] {title}")
+            
+        if res["filtered"] > 0:
+            lines.append(f"
+🛡️ 自动拦截了 {res['filtered']} 个包含违禁标签/黑名单的结果。")
+            
+        lines.append(f"💡 发送 /jm <编号> 进行下载，下一页发送 /jm search {query} {page + 1}")
+        yield event.plain_result("\n".join(lines))
+
+    # ══════════════════════════════════════════════════════════
+    #  /jm batch — 批量下载
+    # ══════════════════════════════════════════════════════════
+
+    async def _handle_batch(self, event: AstrMessageEvent, args: List[str]):
+        """处理 /jm batch 命令"""
+        if not args:
+            yield event.plain_result(
+                "用法:\n"
+                "  /jm batch <编号> [编号2...]  批量下载多个本子\n"
+                "  /jm batch on/off           开启/关闭批量下载 (管理员)\n"
+                "  /jm batch max <数量>       设置单次批量上限 (管理员，-1 为无上限)"
+            )
+            return
+
+        cfg = self._get_config()
+        base_dir = Path(cfg["download_base_dir"])
+        base_dir.mkdir(parents=True, exist_ok=True)
+        meta = self._load_downloads(base_dir)
+
+        sub = args[0].lower()
+        is_admin = self._is_admin(event)
+
+        if sub in ["on", "off"]:
+            if not is_admin:
+                yield event.plain_result("⛔ 仅管理员可设置批量下载开关。")
+                return
+            meta["batch_enabled"] = (sub == "on")
+            self._save_downloads(base_dir, meta)
+            yield event.plain_result(f"✅ 批量下载功能已{'开启' if sub == 'on' else '关闭'}。")
+            return
+            
+        if sub == "max":
+            if not is_admin:
+                yield event.plain_result("⛔ 仅管理员可设置批量下载上限。")
+                return
+            if len(args) < 2 or not (args[1].isdigit() or args[1] == "-1"):
+                yield event.plain_result("❌ 请输入有效的数量 (数字，-1为无上限)。")
+                return
+            meta["batch_max"] = int(args[1])
+            self._save_downloads(base_dir, meta)
+            yield event.plain_result(f"✅ 批量下载单次上限已设为: {'无上限' if args[1] == '-1' else args[1]}。")
+            return
+
+        # 执行批量下载
+        if not meta.get("batch_enabled", True):
+            yield event.plain_result("⛔ 批量下载功能当前已被管理员关闭。")
+            return
+
+        # 解析编号：将所有参数拼起来，把非数字字符全部视作分隔符
+        raw_str = " ".join(args)
+        import re
+        ids = list(dict.fromkeys(re.findall(r'\d+', raw_str))) # 提取并去重
+        
+        if not ids:
+            yield event.plain_result("❌ 未检测到有效的漫画编号。")
+            return
+
+        batch_max = meta.get("batch_max", 10)
+        if batch_max != -1 and len(ids) > batch_max:
+            yield event.plain_result(f"⚠️ 单次最多允许批量下载 {batch_max} 本，您提交了 {len(ids)} 本。请分批下载。")
+            return
+
+        yield event.plain_result(f"🚀 收到批量下载请求，共 {len(ids)} 本。已加入后台队列，将按顺序发送，请耐心等待...")
+        
+        # 逐个触发下载
+        for aid in ids:
+            async for res in self._handle_download(event, aid):
+                yield res
+
 
     # ══════════════════════════════════════════════════════════
     #  /jm <编号> — 下载
