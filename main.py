@@ -696,6 +696,17 @@ dir_rule:
             return
 
         args = self._parse_args(event)
+        sender_id, group_id = await self._get_sender_info(event)
+        ctx_key = (sender_id, group_id)
+        
+        if args and args[0].lower() == "page":
+            if ctx_key not in self.search_context:
+                yield event.plain_result("❌ 没有可翻页的搜索记录，请先使用 /jm search <关键词>")
+                return
+            query = self.search_context[ctx_key]
+            # 转换为 /jm search <query> <page>
+            args = ["search"] + query.split() + args[1:]
+            
         if not args:
             yield event.plain_result(
                 "📚 JMComic 漫画下载器\n"
@@ -719,6 +730,16 @@ dir_rule:
             return
 
         sub = args[0].lower()
+        
+        if sub == "search":
+            # 保存搜索上下文 (不包含页码)
+            page_query = args[1:]
+            if page_query and page_query[-1].isdigit():
+                page_query = page_query[:-1]
+            if page_query:
+                self.search_context[ctx_key] = " ".join(page_query)
+        else:
+            self.search_context.pop(ctx_key, None)
 
         if sub == "list":
             async for result in self._handle_list(event):
@@ -856,8 +877,31 @@ dir_rule:
             lines.append(f"
 🛡️ 自动拦截了 {res['filtered']} 个包含违禁标签/黑名单的结果。")
             
-        lines.append(f"💡 发送 /jm <编号> 进行下载，下一页发送 /jm search {query} {page + 1}")
-        yield event.plain_result("\n".join(lines))
+        lines.append(f"💡 下载发送 /jm <编号>，下一页发送 /jm page {page + 1}")
+        text = "\n".join(lines)
+        
+        # 获取第一条结果的封面
+        try:
+            first_aid = items[0][0]
+            cfg = self._get_config()
+            base_dir = Path(cfg["download_base_dir"])
+            base_dir.mkdir(parents=True, exist_ok=True)
+            cover_path = str(base_dir / f"cover_search_{first_aid}.jpg")
+            
+            def _download_cover():
+                client = jmcomic.JmOption.default().build_jm_client()
+                client.download_album_cover(first_aid, cover_path)
+                
+            await loop.run_in_executor(self._executor, _download_cover)
+            
+            if Path(cover_path).exists():
+                yield event.make_result().file_image(cover_path).message(text)
+                return
+        except Exception as e:
+            logger.error(f"[JMDownloader] 获取封面失败: {e}")
+            
+        # 如果获取封面失败，回退到纯文本
+        yield event.plain_result(text)
 
     # ══════════════════════════════════════════════════════════
     #  /jm batch — 批量下载
