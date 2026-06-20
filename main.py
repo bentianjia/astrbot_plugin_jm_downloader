@@ -816,8 +816,8 @@ dir_rule:
             if not raw_items:
                 return {"items": [], "filtered": 0, "total": 0}
                 
-            # 只取前 10 个结果进行校验，减少接口请求时间
-            items_to_check = raw_items[:10]
+            # 只取前 5 个结果进行校验，减少接口请求时间和图片刷屏
+            items_to_check = raw_items[:5]
             valid_results = []
             filtered_count = 0
             
