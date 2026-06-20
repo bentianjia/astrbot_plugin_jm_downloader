@@ -816,15 +816,23 @@ dir_rule:
             if not raw_items:
                 return {"items": [], "filtered": 0, "total": 0}
                 
-            # 我们只取前 15 个结果进行校验，避免接口请求过多
-            items_to_check = raw_items[:15]
+            # 只取前 10 个结果进行校验，减少接口请求时间
+            items_to_check = raw_items[:10]
             valid_results = []
             filtered_count = 0
             
-            # 并发获取详细信息以检查 tags
+            # 如果没有任何全局或个人的标签黑名单，则无需获取详情，极大提升速度
+            if not blacklisted_tags:
+                for item in items_to_check:
+                    if self._is_jm_blacklisted(item[0], sender_id, group_id):
+                        filtered_count += 1
+                    else:
+                        valid_results.append((item[0], item[1]))
+                return {"items": valid_results, "filtered": filtered_count, "total": len(raw_items)}
+            
+            # 否则并发获取详细信息以检查 tags
             import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                # 提交所有请求
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
                 future_to_item = {
                     executor.submit(client.get_album_detail, item[0]): item
                     for item in items_to_check
@@ -834,14 +842,12 @@ dir_rule:
                     item = future_to_item[future]
                     try:
                         album_detail = future.result()
-                        # 校验黑名单
                         is_safe = True
-                        if blacklisted_tags:
-                            for t in album_detail.tags:
-                                if t in blacklisted_tags:
-                                    is_safe = False
-                                    break
-                                    
+                        for t in album_detail.tags:
+                            if t in blacklisted_tags:
+                                is_safe = False
+                                break
+                                
                         if self._is_jm_blacklisted(item[0], sender_id, group_id):
                             is_safe = False
                             
@@ -878,7 +884,7 @@ dir_rule:
             def _download_all_covers():
                 client = jmcomic.JmOption.default().build_jm_client()
                 import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
                     for aid, _ in items:
                         cover_path = str(base_dir / f"cover_search_{aid}.jpg")
                         if not Path(cover_path).exists():
