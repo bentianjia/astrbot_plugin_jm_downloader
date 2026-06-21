@@ -879,14 +879,17 @@ dir_rule:
         try:
             cfg = self._get_config()
             base_dir = Path(cfg["download_base_dir"]).absolute()
-            base_dir.mkdir(parents=True, exist_ok=True)
+            search_covers_dir = base_dir / "search_covers"
+            search_covers_dir.mkdir(parents=True, exist_ok=True)
+            
+            cover_paths = [str(search_covers_dir / f"cover_search_{aid}.jpg") for aid, _ in items]
             
             def _download_all_covers():
                 client = jmcomic.JmOption.default().build_jm_client()
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
                     for aid, _ in items:
-                        cover_path = str(base_dir / f"cover_search_{aid}.jpg")
+                        cover_path = str(search_covers_dir / f"cover_search_{aid}.jpg")
                         if not Path(cover_path).exists():
                             executor.submit(client.download_album_cover, aid, cover_path)
                             
@@ -902,11 +905,28 @@ dir_rule:
             sorted_items = sorted(items, key=lambda x: int(x[0]), reverse=True)
             for aid, title in sorted_items:
                 result.message(f"\n📦 [{aid}] {title}\n")
-                cover_path = str(base_dir / f"cover_search_{aid}.jpg")
+                cover_path = str(search_covers_dir / f"cover_search_{aid}.jpg")
                 if Path(cover_path).exists():
                     result.file_image(cover_path)
                     
             result.message(f"\n💡 下载发送 /jm <编号>，下一页发送 /jm page {page + 1}")
+            
+            # 5 分钟后自动清理搜索封面的任务
+            async def cleanup_search_covers(paths_to_clean):
+                await asyncio.sleep(300)
+                for p in paths_to_clean:
+                    try:
+                        p_obj = Path(p)
+                        if p_obj.exists():
+                            p_obj.unlink()
+                    except Exception as e:
+                        logger.error(f"[JMDownloader] 清理搜索封面异常 {p}: {e}")
+            
+            task_id = f"search_cleanup_{time.time()}"
+            task = asyncio.create_task(cleanup_search_covers(cover_paths))
+            self._cleanup_tasks[task_id] = task
+            task.add_done_callback(lambda t: self._cleanup_tasks.pop(task_id, None))
+            
             yield result
             return
             
