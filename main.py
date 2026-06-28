@@ -173,7 +173,7 @@ class JmDownloaderPlugin(Star):
         if domain_list:
             domains = [d.strip() for d in domain_list.split(",") if d.strip()]
             if domains:
-                yaml_str += "\ndomain_list:\n" + "\n".join([f"  - {d}" for d in domains])
+                yaml_str += "\nclient:\n  domain:\n" + "\n".join([f"    - {d}" for d in domains])
                 
         jmcomic = _get_jmcomic()
         if not yaml_str.strip():
