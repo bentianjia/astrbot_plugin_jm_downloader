@@ -156,7 +156,35 @@ class JmDownloaderPlugin(Star):
             "download_base_dir": base_dir,
             "pdf_quality": max(1, min(100, int(cfg.get("pdf_quality", 95)))),
             "progress_updates": bool(cfg.get("progress_updates", True)),
+            "domain_list": str(cfg.get("domain_list", "")),
+            "proxy": str(cfg.get("proxy", "")),
         }
+
+    def _get_jm_option(self, extra_yaml: str = "") -> Any:
+        """根据配置项和附加参数生成 jmcomic 的 Option 对象。支持自定义域名和代理"""
+        cfg = self._get_config()
+        domain_list = cfg.get("domain_list", "")
+        proxy = cfg.get("proxy", "")
+        yaml_str = extra_yaml
+        
+        client_yml = ""
+        
+        if domain_list:
+            domains = [d.strip() for d in domain_list.split(",") if d.strip()]
+            if domains:
+                client_yml += "  domain:\n" + "\n".join([f"    - {d}" for d in domains]) + "\n"
+                
+        if proxy:
+            p = proxy.strip()
+            client_yml += f"  postman:\n    meta_data:\n      proxies:\n        http: {p}\n        https: {p}\n"
+
+        if client_yml:
+            yaml_str += "\nclient:\n" + client_yml
+            
+        jmcomic = _get_jmcomic()
+        if not yaml_str.strip():
+            return jmcomic.JmOption.default()
+        return jmcomic.create_option_by_str(yaml_str)
     # ══════════════════════════════════════════════════════════
     #  工具方法
     # ══════════════════════════════════════════════════════════
@@ -484,7 +512,7 @@ download:
 dir_rule:
   base_dir: '{str(tmp_dir).replace('\\', '/')}'
 """
-            option = jmcomic.create_option_by_str(option_str)
+            option = self._get_jm_option(option_str)
             client = option.build_jm_client()
             album = client.get_album_detail(album_id)
             
@@ -823,7 +851,7 @@ dir_rule:
         blacklisted_tags = self._get_combined_blacklisted_tags(sender_id, group_id)
         
         def _do_search():
-            client = jmcomic.JmOption.default().build_jm_client()
+            client = self._get_jm_option().build_jm_client()
             search_page = client.search_site(query, page=page)
             
             raw_items = list(search_page.iter_id_title_tag())
@@ -903,7 +931,7 @@ dir_rule:
             cover_paths = [str(search_covers_dir / f"cover_search_{aid}.jpg") for aid, _ in items]
             
             def _download_all_covers():
-                client = jmcomic.JmOption.default().build_jm_client()
+                client = self._get_jm_option().build_jm_client()
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
                     for aid, _ in items:

@@ -22,5 +22,17 @@
     "label": "进度通知",
     "default": true,
     "description": "下载过程中是否在群里发送进度消息"
+  },
+  "domain_list": {
+    "type": "string",
+    "label": "自定义域名 (解决报错必填)",
+    "default": "18comic.vip, 18comic.org",
+    "description": "解决「请求重试全部失败」问题。如果默认域名失效，请填入最新的禁漫天堂有效域名（多个用英文逗号分隔）。"
+  },
+  "proxy": {
+    "type": "string",
+    "label": "代理服务器 (解决连不上)",
+    "default": "",
+    "description": "如果换了域名依然连不上，说明您的网络被墙，请配置代理（例如 http://127.0.0.1:7890 ）。留空则直连。"
   }
 }
