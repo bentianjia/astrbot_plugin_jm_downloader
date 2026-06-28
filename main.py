@@ -156,8 +156,24 @@ class JmDownloaderPlugin(Star):
             "download_base_dir": base_dir,
             "pdf_quality": max(1, min(100, int(cfg.get("pdf_quality", 95)))),
             "progress_updates": bool(cfg.get("progress_updates", True)),
+            "domain_list": str(cfg.get("domain_list", "")),
         }
 
+    def _get_jm_option(self, extra_yaml: str = "") -> Any:
+        """根据配置项和附加参数生成 jmcomic 的 Option 对象。支持自定义域名列表"""
+        cfg = self._get_config()
+        domain_list = cfg.get("domain_list", "")
+        yaml_str = extra_yaml
+        
+        if domain_list:
+            domains = [d.strip() for d in domain_list.split(",") if d.strip()]
+            if domains:
+                yaml_str += "\ndomain_list:\n" + "\n".join([f"  - {d}" for d in domains])
+                
+        jmcomic = _get_jmcomic()
+        if not yaml_str.strip():
+            return jmcomic.JmOption.default()
+        return jmcomic.create_option_by_str(yaml_str)
     # ══════════════════════════════════════════════════════════
     #  工具方法
     # ══════════════════════════════════════════════════════════
@@ -485,8 +501,7 @@ download:
 dir_rule:
   base_dir: '{str(tmp_dir).replace('\\', '/')}'
 """
-            option = jmcomic.create_option_by_str(option_str)
-            
+            option = self._get_jm_option(option_str)
             client = option.build_jm_client()
             album = client.get_album_detail(album_id)
             
@@ -723,20 +738,26 @@ dir_rule:
                 "📚 JMComic 漫画下载器\n"
                 "用法:\n"
                 "  /jm <编号>        下载漫画并上传 PDF\n"
+                "  /jm search <关键词> 搜索漫画\n"
+                "  /jm page <页码>    搜索翻页\n"
+                "  /jm batch <编号> [编号2...] 批量下载多个漫画\n"
                 "  /jm list           列出已下载的漫画\n"
-                "  /jm delete <编号>  删除指定漫画（管理员）\n"
-                "  /jm delete all     删除全部漫画（管理员）\n"
+                "  /jm delete <编号>  删除指定漫画缓存（管理员）\n"
+                "  /jm delete all     删除全部漫画缓存（管理员）\n"
+                "  /jm batch on/off   开启/关闭批量下载（管理员）\n"
+                "  /jm batch max <数> 设置批量单次上限（管理员）\n"
                 "  /jm group off <群号> 对该群禁用（管理员）\n"
                 "  /jm group on <群号>  对该群恢复（管理员）\n"
                 "  /jm black add <QQ号> 拉黑用户（管理员）\n"
                 "  /jm black remove <QQ号> 移除拉黑（管理员）\n"
-                "  /jm black list    查看黑名单（管理员）\n"
-                "  /jm black_jm add <编号> 拉黑漫画（管理员）\n"
-                "  /jm black_jm remove <编号> 移除漫画拉黑（管理员）\n"
-                "  /jm black_jm list  查看已拉黑漫画（管理员）\n"
-                "  /jm black_tag add <标签> 拉黑包含该标签的漫画（管理员）\n"
-                "  /jm black_tag remove <标签> 移除标签拉黑（管理员）\n"
-                "  /jm black_tag list  查看已拉黑的标签（管理员）"
+                "  /jm black list    查看用户黑名单（管理员）\n"
+                "  /jm black_jm add <编号> 拉黑单本漫画（管理员）\n"
+                "  /jm black_jm remove <编号> 移除单本漫画拉黑（管理员）\n"
+                "  /jm black_jm list  查看单本拉黑列表（管理员）\n"
+                "  /jm black_tag add <作用域> <标签> 拉黑特定标签（管理员）\n"
+                "  /jm black_tag remove <作用域> <标签> 移除标签拉黑（管理员）\n"
+                "  /jm black_tag list <作用域> 查看已拉黑的标签（管理员）\n"
+                "  /jm black_tag remove_all <作用域> confirm 清空该作用域标签拉黑（管理员）"
             )
             return
 
@@ -819,7 +840,7 @@ dir_rule:
         blacklisted_tags = self._get_combined_blacklisted_tags(sender_id, group_id)
         
         def _do_search():
-            client = jmcomic.JmOption.default().build_jm_client()
+            client = self._get_jm_option().build_jm_client()
             search_page = client.search_site(query, page=page)
             
             raw_items = list(search_page.iter_id_title_tag())
@@ -899,7 +920,7 @@ dir_rule:
             cover_paths = [str(search_covers_dir / f"cover_search_{aid}.jpg") for aid, _ in items]
             
             def _download_all_covers():
-                client = jmcomic.JmOption.default().build_jm_client()
+                client = self._get_jm_option().build_jm_client()
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
                     for aid, _ in items:
