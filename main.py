@@ -151,12 +151,17 @@ class JmDownloaderPlugin(Star):
         except Exception as e:
             logger.error(f"[JMDownloader] 创建下载根目录失败: {e}")
 
+        default_domains = "www.cdnplaystation6.vip, www.cdnaspa.vip, www.cdnplaystation6.cc, www.cdnaspa.club"
+        domain_list = str(cfg.get("domain_list", ""))
+        if not domain_list.strip():
+            domain_list = default_domains
+
         return {
             "enable": bool(cfg.get("enable", True)),
             "download_base_dir": base_dir,
             "pdf_quality": max(1, min(100, int(cfg.get("pdf_quality", 95)))),
             "progress_updates": bool(cfg.get("progress_updates", True)),
-            "domain_list": str(cfg.get("domain_list", "")),
+            "domain_list": domain_list,
         }
 
     def _get_jm_option(self, extra_yaml: str = "") -> Any:
