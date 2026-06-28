@@ -9,7 +9,7 @@
     "type": "string",
     "label": "下载根目录",
     "default": "data/jm_downloads",
-    "description": "漫画下载和 PDF 存储的目录，支持绝对路径或相对路径（相对于 AstrBot 工作目录）"
+    "description": "漫画下载和 PDF 存储的完整目录（如 C://Downloads），没有则自动创建，默认在 data/jm_downloads。支持中文路径。"
   },
   "pdf_quality": {
     "type": "int",

@@ -136,9 +136,20 @@ class JmDownloaderPlugin(Star):
         except Exception:
             cfg = {}
 
-        base_dir = str(cfg.get("download_base_dir", "data/jm_downloads"))
+        base_dir_raw = cfg.get("download_base_dir", "")
+        if not base_dir_raw or not str(base_dir_raw).strip():
+            base_dir_raw = "data/jm_downloads"
+            
+        base_dir = str(base_dir_raw).strip()
         if not os.path.isabs(base_dir):
-            base_dir = os.path.join(os.getcwd(), base_dir)
+            base_dir = os.path.abspath(os.path.join(os.getcwd(), base_dir))
+        else:
+            base_dir = os.path.abspath(base_dir)
+            
+        try:
+            os.makedirs(base_dir, exist_ok=True)
+        except Exception as e:
+            logger.error(f"[JMDownloader] 创建下载根目录失败: {e}")
 
         return {
             "enable": bool(cfg.get("enable", True)),
@@ -460,7 +471,6 @@ class JmDownloaderPlugin(Star):
                 "album_id": album_id,
             }
 
-        orig_cwd = os.getcwd()
         tmp_dir = base_dir / f"_tmp_{album_id}"
         tmp_dir.mkdir(parents=True, exist_ok=True)
         title = album_id
@@ -506,11 +516,11 @@ dir_rule:
                 title = subdirs[0].name
 
             # ── 步骤 3: 递归搜索所有图片并平铺移动 ──
-            image_extensions = (".webp", ".jpg", ".jpeg", ".png")
+            image_extensions = {".webp", ".jpg", ".jpeg", ".png"}
             image_files_found = []
-            for ext in image_extensions:
-                image_files_found.extend(tmp_dir.rglob(f"*{ext}"))
-                image_files_found.extend(tmp_dir.rglob(f"*{ext.upper()}"))
+            for p in tmp_dir.rglob("*"):
+                if p.is_file() and p.suffix.lower() in image_extensions:
+                    image_files_found.append(p)
 
             # 去重
             image_files_found = list(dict.fromkeys(image_files_found))
@@ -629,7 +639,6 @@ dir_rule:
                 "album_id": album_id,
             }
         finally:
-            os.chdir(orig_cwd)
             try:
                 shutil.rmtree(tmp_dir)
             except Exception:
@@ -644,30 +653,31 @@ dir_rule:
         event: AstrMessageEvent,
         group_id: Optional[int],
         sender_id: int,
-        pdf_path: str,
+        file_path: str,
         album_id: str,
         title: str,
     ) -> bool:
-        """上传 PDF。群聊用 upload_group_file，私聊用 upload_private_file。"""
+        """上传文件（PDF 或 ZIP）。"""
         bot = await self._get_bot(event)
         if not bot:
             return False
 
-        display_name = f"JM{album_id}_{self._sanitize_filename(title, 20)}.pdf"
+        ext = Path(file_path).suffix
+        display_name = f"JM{album_id}_{self._sanitize_filename(title, 20)}{ext}"
 
         try:
             if group_id:
                 resp = await bot.call_action(
                     "upload_group_file",
                     group_id=group_id,
-                    file=pdf_path,
+                    file=file_path,
                     name=display_name,
                 )
             else:
                 resp = await bot.call_action(
                     "upload_private_file",
                     user_id=sender_id,
-                    file=pdf_path,
+                    file=file_path,
                     name=display_name,
                 )
             logger.info(
@@ -832,14 +842,15 @@ dir_rule:
             
             # 否则并发获取详细信息以检查 tags
             import concurrent.futures
+            results_with_order = []
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-                future_to_item = {
-                    executor.submit(client.get_album_detail, item[0]): item
-                    for item in items_to_check
+                future_to_index = {
+                    executor.submit(client.get_album_detail, item[0]): (i, item)
+                    for i, item in enumerate(items_to_check)
                 }
                 
-                for future in concurrent.futures.as_completed(future_to_item):
-                    item = future_to_item[future]
+                for future in concurrent.futures.as_completed(future_to_index):
+                    i, item = future_to_index[future]
                     try:
                         album_detail = future.result()
                         is_safe = True
@@ -852,12 +863,15 @@ dir_rule:
                             is_safe = False
                             
                         if is_safe:
-                            valid_results.append((item[0], item[1]))
+                            results_with_order.append((i, (item[0], item[1])))
                         else:
                             filtered_count += 1
                     except Exception as e:
                         logger.error(f"[JMDownloader] 搜索校验异常 {item[0]}: {e}")
                         
+            # 恢复原始搜索排序
+            results_with_order.sort(key=lambda x: x[0])
+            valid_results = [r[1] for r in results_with_order]
             return {"items": valid_results, "filtered": filtered_count, "total": len(raw_items)}
 
         try:
@@ -871,7 +885,7 @@ dir_rule:
         if not items:
             msg = f"📭 「{query}」第 {page} 页没有找到可用结果。"
             if res["filtered"] > 0:
-                msg += f"\\n(拦截了 {res['filtered']} 个包含违禁词的本子)"
+                msg += f"\n(拦截了 {res['filtered']} 个包含违禁词的本子)"
             yield event.plain_result(msg)
             return
             
@@ -902,8 +916,7 @@ dir_rule:
                 info_text += f"🛡️ 自动拦截了 {res['filtered']} 个包含违禁词/黑名单的结果。\n"
             result.message(info_text)
             
-            sorted_items = sorted(items, key=lambda x: int(x[0]), reverse=True)
-            for aid, title in sorted_items:
+            for aid, title in items:
                 result.message(f"\n📦 [{aid}] {title}\n")
                 cover_path = str(search_covers_dir / f"cover_search_{aid}.jpg")
                 if Path(cover_path).exists():
@@ -935,7 +948,7 @@ dir_rule:
             
         # 回退逻辑
         lines = [f"🔍 搜索「{query}」结果 (第 {page} 页):"]
-        for aid, title in sorted(items, key=lambda x: int(x[0]), reverse=True):
+        for aid, title in items:
             lines.append(f"📦 [{aid}] {title}")
         if res["filtered"] > 0:
             lines.append(f"\n🛡️ 自动拦截了 {res['filtered']} 个包含违禁词/黑名单的结果。")
@@ -1089,9 +1102,28 @@ dir_rule:
             except Exception as e:
                 yield event.plain_result(
                     f"⚠️ PDF 上传失败: {e}\n"
-                    f"文件路径: {pdf_path}\n"
-                    f"[CQ:at,qq={sender_id}] 请联系管理员手动上传"
+                    f"[CQ:at,qq={sender_id}] 正在尝试为您上传 ZIP 压缩包作为替代..."
                 )
+                try:
+                    if not zip_path.exists():
+                        def do_zip():
+                            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                                zf.write(pdf_path, arcname=pdf_path.name)
+                        await asyncio.get_event_loop().run_in_executor(self._executor, do_zip)
+                    
+                    await self._upload_file(
+                        event, group_id, sender_id, str(zip_path), album_id, title
+                    )
+                    yield event.plain_result(
+                        f"✅ [CQ:at,qq={sender_id}] "
+                        f"ZIP 压缩包已成功作为替代上传！"
+                    )
+                except Exception as e2:
+                    yield event.plain_result(
+                        f"❌ ZIP 上传也失败了: {e2}\n"
+                        f"文件路径: {pdf_path}\n"
+                        f"[CQ:at,qq={sender_id}] 请联系管理员手动上传"
+                    )
             
             # 无论成功与否，重置5分钟清理倒计时
             self._schedule_pdf_cleanup(album_id, pdf_path, zip_path)
@@ -1148,7 +1180,6 @@ dir_rule:
         }
         self._save_downloads(base_dir, meta)
 
-        # ── 上传 → 仅一条最终消息 ──
         try:
             await self._upload_file(
                 event, group_id, sender_id, pdf_path_str, album_id, title
@@ -1162,9 +1193,28 @@ dir_rule:
         except Exception as e:
             yield event.plain_result(
                 f"⚠️ PDF 已生成但上传失败: {e}\n"
-                f"📁 文件: {pdf_path_str}\n"
-                f"[CQ:at,qq={sender_id}] 请联系管理员手动上传"
+                f"[CQ:at,qq={sender_id}] 正在尝试为您上传 ZIP 压缩包作为替代..."
             )
+            try:
+                if not zip_path.exists():
+                    def do_zip():
+                        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                            zf.write(pdf_path, arcname=pdf_path.name)
+                    await asyncio.get_event_loop().run_in_executor(self._executor, do_zip)
+                
+                await self._upload_file(
+                    event, group_id, sender_id, str(zip_path), album_id, title
+                )
+                yield event.plain_result(
+                    f"✅ [CQ:at,qq={sender_id}] "
+                    f"ZIP 压缩包已成功作为替代上传！"
+                )
+            except Exception as e2:
+                yield event.plain_result(
+                    f"❌ ZIP 上传也失败了: {e2}\n"
+                    f"📁 文件: {pdf_path_str}\n"
+                    f"[CQ:at,qq={sender_id}] 请联系管理员手动上传"
+                )
         
         # 触发 5 分钟倒计时清理
         self._schedule_pdf_cleanup(album_id, pdf_path, zip_path)
