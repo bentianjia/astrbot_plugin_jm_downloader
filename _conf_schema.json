@@ -22,11 +22,5 @@
     "label": "进度通知",
     "default": true,
     "description": "下载过程中是否在群里发送进度消息"
-  },
-  "domain_list": {
-    "type": "string",
-    "label": "自定义域名 (可选)",
-    "default": "www.cdnplaystation6.vip, www.cdnaspa.vip, www.cdnplaystation6.cc, www.cdnaspa.club",
-    "description": "解决禁漫请求失败/连不上网络的问题。填入可用的禁漫域名（多个用英文逗号分隔）。"
   }
 }

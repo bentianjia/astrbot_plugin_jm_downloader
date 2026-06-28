@@ -151,34 +151,12 @@ class JmDownloaderPlugin(Star):
         except Exception as e:
             logger.error(f"[JMDownloader] 创建下载根目录失败: {e}")
 
-        default_domains = "www.cdnplaystation6.vip, www.cdnaspa.vip, www.cdnplaystation6.cc, www.cdnaspa.club"
-        domain_list = str(cfg.get("domain_list", ""))
-        if not domain_list.strip():
-            domain_list = default_domains
-
         return {
             "enable": bool(cfg.get("enable", True)),
             "download_base_dir": base_dir,
             "pdf_quality": max(1, min(100, int(cfg.get("pdf_quality", 95)))),
             "progress_updates": bool(cfg.get("progress_updates", True)),
-            "domain_list": domain_list,
         }
-
-    def _get_jm_option(self, extra_yaml: str = "") -> Any:
-        """根据配置项和附加参数生成 jmcomic 的 Option 对象。支持自定义域名列表"""
-        cfg = self._get_config()
-        domain_list = cfg.get("domain_list", "")
-        yaml_str = extra_yaml
-        
-        if domain_list:
-            domains = [d.strip() for d in domain_list.split(",") if d.strip()]
-            if domains:
-                yaml_str += "\nclient:\n  domain:\n" + "\n".join([f"    - {d}" for d in domains])
-                
-        jmcomic = _get_jmcomic()
-        if not yaml_str.strip():
-            return jmcomic.JmOption.default()
-        return jmcomic.create_option_by_str(yaml_str)
     # ══════════════════════════════════════════════════════════
     #  工具方法
     # ══════════════════════════════════════════════════════════
@@ -506,7 +484,7 @@ download:
 dir_rule:
   base_dir: '{str(tmp_dir).replace('\\', '/')}'
 """
-            option = self._get_jm_option(option_str)
+            option = jmcomic.create_option_by_str(option_str)
             client = option.build_jm_client()
             album = client.get_album_detail(album_id)
             
@@ -845,7 +823,7 @@ dir_rule:
         blacklisted_tags = self._get_combined_blacklisted_tags(sender_id, group_id)
         
         def _do_search():
-            client = self._get_jm_option().build_jm_client()
+            client = jmcomic.JmOption.default().build_jm_client()
             search_page = client.search_site(query, page=page)
             
             raw_items = list(search_page.iter_id_title_tag())
@@ -925,7 +903,7 @@ dir_rule:
             cover_paths = [str(search_covers_dir / f"cover_search_{aid}.jpg") for aid, _ in items]
             
             def _download_all_covers():
-                client = self._get_jm_option().build_jm_client()
+                client = jmcomic.JmOption.default().build_jm_client()
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
                     for aid, _ in items:
